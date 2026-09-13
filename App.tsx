@@ -1,660 +1,544 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import {
-  BookOpen,
-  Calendar,
-  Sparkles,
-  Zap,
-  SlidersHorizontal,
-  ArrowUpDown,
-  Search,
-  CheckCircle2,
-  Lock,
-  Download,
-  AlertCircle,
-  MessageCircle,
-  Send,
-  Star,
-  ShieldCheck,
-  ExternalLink,
-  Package,
-  Truck
-} from 'lucide-react';
-import { Product, Order, Language, ProductCategory, ProductType, CartItem } from './types';
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut as fbSignOut,
+  updateProfile,
+  type User as FbUser,
+} from 'firebase/auth';
 import {
-  loadProducts,
-  saveProducts,
-  resetProducts,
-  loadOrders,
-  saveOrder,
-  toggleProductStatus,
-  updateOrder,
-  loadCart,
-  saveCart,
-  clearCartStorage
-} from './utils/storage';
-import { productService } from './services/productService';
-import { sendTelegramOrderAlert } from './utils/telegram';
-import { Header } from './components/Header';
-import { ProductCard } from './components/ProductCard';
-import { ProductDetailsModal } from './components/ProductDetailsModal';
-import { UpiCheckoutModal } from './components/UpiCheckoutModal';
-import { PhysicalCheckoutModal } from './components/PhysicalCheckoutModal';
-import { OrderConfirmationModal } from './components/OrderConfirmationModal';
-import { MyDownloadsModal } from './components/MyDownloadsModal';
-import { AdminModal } from './components/AdminModal';
-import { SupplierPanel } from './components/SupplierPanel';
-import { CartDrawer } from './components/CartDrawer';
-import { CartCheckoutModal } from './components/CartCheckoutModal';
-import { ScarletLogo } from './components/ScarletLogo';
-import { Footer } from './components/Footer';
-import { CountdownBanner } from './components/CountdownBanner';
-import { SocialProofToast } from './components/SocialProofToast';
-import { FloatingSupportButton } from './components/FloatingSupportButton';
-import { CustomerSupportModal } from './components/CustomerSupportModal';
-import { SamplePreviewModal } from './components/SamplePreviewModal';
-import { OrderTrackingModal } from './components/OrderTrackingModal';
-import { t } from './data/translations';
+  collection,
+  getDocs,
+  query,
+  where,
+  orderBy,
+  addDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
+import { Header } from './src/components/Header';
+import { BottomNav } from './src/components/BottomNav';
+import { ProductCard } from './src/components/ProductCard';
+import { ProductModal } from './src/components/ProductModal';
+import { CartDrawer } from './src/components/CartDrawer';
+import { CheckoutModal } from './src/components/CheckoutModal';
+import { OrderConfirmationModal } from './src/components/OrderConfirmationModal';
+import { OrderTrackingModal } from './src/components/OrderTrackingModal';
+import { AccountModal } from './src/components/AccountModal';
+import { Footer } from './src/components/Footer';
+import { PRODUCTS } from './src/data/products';
+import { auth, db } from './src/lib/firebase';
+import { supabase } from './src/lib/supabase';
+import type { Product, CartItem, Order, UserProfile, SavedAddress } from './src/types';
+
+const CART_KEY = 'scarlet_cart';
+const USER_KEY = 'scarlet_user';
+const ADDR_KEY = 'scarlet_addresses';
+
+export async function fetchFirestoreProducts(): Promise<Product[]> {
+  try {
+    const snap = await getDocs(collection(db, 'products'));
+    if (snap.empty) return [];
+    const products: Product[] = [];
+    snap.forEach((doc) => {
+      const d = doc.data() as any;
+      products.push({
+        id: doc.id,
+        title: d.title || d.name || '',
+        description: d.description || '',
+        category: d.category || 'packaging',
+        productType: d.productType || d.type || 'physical',
+        price: Number(d.price) || 0,
+        originalPrice: Number(d.originalPrice || d.mrp || d.price) || 0,
+        rating: Number(d.rating) || 4.5,
+        reviewsCount: Number(d.reviewsCount || d.reviews) || 0,
+        image: d.image || d.imageUrl || 'https://images.pexels.com/photos/906464/pexels-photo-906464.jpeg?auto=compress&cs=tinysrgb&h=650&w=940',
+        stock: Number(d.stock) || 0,
+        badge: d.badge || undefined,
+        deliveryDays: Number(d.deliveryDays) || 3,
+        fileName: d.fileName || undefined,
+        fileSize: d.fileSize || undefined,
+        fileFormat: d.fileFormat || undefined,
+      });
+    });
+    return products;
+  } catch (err) {
+    console.error('Failed to fetch products from Firestore:', err);
+    return [];
+  }
+}
+
+export async function saveOrderToFirestore(order: Order): Promise<void> {
+  try {
+    await addDoc(collection(db, 'orders'), {
+      orderNumber: order.orderNumber,
+      items: JSON.parse(JSON.stringify(order.items)),
+      itemTotal: order.itemTotal,
+      deliveryFee: order.deliveryFee,
+      discount: order.discount,
+      total: order.total,
+      paymentMethod: order.paymentMethod,
+      paymentStatus: order.paymentStatus,
+      customerName: order.customerName,
+      customerPhone: order.customerPhone,
+      customerEmail: order.customerEmail || null,
+      shippingAddress: order.shippingAddress || null,
+      status: order.status,
+      hasDigital: order.hasDigital,
+      licenseKeys: order.licenseKeys,
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.error('Failed to save order to Firestore:', err);
+  }
+}
+
+export async function searchFirestoreOrders(queryValue: string): Promise<Order[]> {
+  try {
+    const isPhone = /^\d{10}$/.test(queryValue.trim());
+    let snap;
+    if (isPhone) {
+      const q = query(collection(db, 'orders'), where('customerPhone', '==', queryValue.trim()));
+      snap = await getDocs(q);
+    } else {
+      const q = query(collection(db, 'orders'), where('orderNumber', '==', queryValue.trim().toUpperCase()));
+      snap = await getDocs(q);
+    }
+    const orders: Order[] = [];
+    snap.forEach((doc) => {
+      const d = doc.data() as any;
+      orders.push({
+        id: doc.id,
+        orderNumber: d.orderNumber || '',
+        items: d.items || [],
+        itemTotal: Number(d.itemTotal) || 0,
+        deliveryFee: Number(d.deliveryFee) || 0,
+        discount: Number(d.discount) || 0,
+        total: Number(d.total) || 0,
+        paymentMethod: d.paymentMethod || 'cod',
+        paymentStatus: d.paymentStatus || 'pending',
+        customerName: d.customerName || '',
+        customerPhone: d.customerPhone || '',
+        customerEmail: d.customerEmail || undefined,
+        shippingAddress: d.shippingAddress || undefined,
+        status: d.status || 'placed',
+        hasDigital: d.hasDigital || false,
+        licenseKeys: d.licenseKeys || {},
+        createdAt: d.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
+      });
+    });
+    return orders;
+  } catch (err) {
+    console.error('Failed to search orders in Firestore:', err);
+    return [];
+  }
+}
+
+export { supabase };
 
 export default function App() {
-  // Core state
-  const [products, setProducts] = useState<Product[]>([]);
-  const [orders, setOrders] = useState<Order[]>([]);
-  const [language, setLanguage] = useState<Language>('en');
-
-  // Dedicated route view detection for Seller Panel (#seller, #/seller, #admin, #/admin)
-  const isSellerRoute = () => {
-    if (typeof window === 'undefined') return false;
-    const hash = (window.location.hash || '').toLowerCase().trim();
-    const pathname = (window.location.pathname || '').toLowerCase().trim();
-    // Normalize hash: removes leading #, leading /, trailing /
-    const cleanHash = hash.replace(/^#\/?/, '').split('?')[0].replace(/\/+$/, '');
-    
-    return (
-      cleanHash === 'seller' ||
-      cleanHash === 'supplier' ||
-      cleanHash === 'admin' ||
-      hash.includes('seller') ||
-      hash.includes('supplier') ||
-      hash.includes('admin') ||
-      pathname.endsWith('/seller') ||
-      pathname.endsWith('/supplier') ||
-      pathname.endsWith('/admin')
-    );
-  };
-  const [isSellerView, setIsSellerView] = useState<boolean>(isSellerRoute);
-
-  const openSellerPanel = () => {
+  const [products, setProducts] = useState<Product[]>(PRODUCTS);
+  const [loadingProducts, setLoadingProducts] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [activeCategory, setActiveCategory] = useState('all');
+  const [activeNav, setActiveNav] = useState('home');
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [cartItems, setCartItems] = useState<CartItem[]>(() => {
     try {
-      window.location.hash = '#seller';
+      const stored = localStorage.getItem(CART_KEY);
+      return stored ? JSON.parse(stored) : [];
     } catch {
-      // fallback
+      return [];
     }
-    setIsSellerView(true);
-  };
+  });
 
-  const closeSellerPanel = () => {
+  // User & addresses
+  const [user, setUser] = useState<UserProfile | null>(() => {
     try {
-      if (window.location.hash) {
-        history.replaceState(null, '', window.location.pathname + window.location.search);
-      }
+      const stored = localStorage.getItem(USER_KEY);
+      return stored ? JSON.parse(stored) : null;
     } catch {
-      window.location.hash = '';
+      return null;
     }
-    setIsSellerView(false);
-  };
+  });
+  const [addresses, setAddresses] = useState<SavedAddress[]>(() => {
+    try {
+      const stored = localStorage.getItem(ADDR_KEY);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
 
+  const [isCartOpen, setIsCartOpen] = useState(false);
+  const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
+  const [confirmedOrder, setConfirmedOrder] = useState<Order | null>(null);
+  const [isTrackingOpen, setIsTrackingOpen] = useState(false);
+  const [isAccountOpen, setIsAccountOpen] = useState(false);
+  const [trackingOrder, setTrackingOrder] = useState<Order | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Fetch products from Firestore on mount, fallback to local
   useEffect(() => {
-    const handleRouteSync = () => {
-      setIsSellerView(isSellerRoute());
-    };
-
-    // Check immediately on mount
-    handleRouteSync();
-
-    window.addEventListener('hashchange', handleRouteSync);
-    window.addEventListener('popstate', handleRouteSync);
-    return () => {
-      window.removeEventListener('hashchange', handleRouteSync);
-      window.removeEventListener('popstate', handleRouteSync);
-    };
+    fetchFirestoreProducts().then((firestoreProducts) => {
+      if (firestoreProducts.length > 0) {
+        setProducts(firestoreProducts);
+      }
+      setLoadingProducts(false);
+    });
   }, []);
 
-  // Filtering and searching: Top-level Type (All | Digital | Physical) + Category (All | eBook | Planner)
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedType, setSelectedType] = useState<'all' | ProductType>('all');
-  const [selectedCategory, setSelectedCategory] = useState<'all' | ProductCategory>('all');
-  const [sortBy, setSortBy] = useState<'featured' | 'price_low' | 'price_high' | 'rating'>('featured');
-
-  // Modals state
-  const [selectedProductForDetails, setSelectedProductForDetails] = useState<Product | null>(null);
-  const [selectedProductForCheckout, setSelectedProductForCheckout] = useState<Product | null>(null);
-  const [selectedProductForPhysicalCheckout, setSelectedProductForPhysicalCheckout] = useState<Product | null>(null);
-  const [latestOrder, setLatestOrder] = useState<Order | null>(null);
-  const [isDownloadsOpen, setIsDownloadsOpen] = useState(false);
-  const [isAdminOpen, setIsAdminOpen] = useState(false);
-  const [isSupportOpen, setIsSupportOpen] = useState(false);
-  const [previewProduct, setPreviewProduct] = useState<Product | null>(null);
-
-  // Meesho-Themed Order Tracking Modal state
-  const [isTrackingOpen, setIsTrackingOpen] = useState(false);
-  const [searchPhone, setSearchPhone] = useState('');
-  const [selectedTrackingOrder, setSelectedTrackingOrder] = useState<Order | null>(null);
-
-  const handleOpenTracking = (order?: Order) => {
-    if (order) {
-      setSelectedTrackingOrder(order);
-      const phone = order.customerPhone || order.shippingAddress?.phone || '';
-      if (phone) {
-        setSearchPhone(phone);
-      }
-    }
-    setIsTrackingOpen(true);
-  };
-
-  // Cart State (Persisted in localStorage)
-  const [cartItems, setCartItems] = useState<CartItem[]>(() => loadCart());
-  const [isCartDrawerOpen, setIsCartDrawerOpen] = useState(false);
-  const [isCartCheckoutOpen, setIsCartCheckoutOpen] = useState(false);
-
-  // Sync cart items to storage whenever updated
+  // Firebase auth state listener
   useEffect(() => {
-    saveCart(cartItems);
+    const unsub = onAuthStateChanged(auth, (fbUser: FbUser | null) => {
+      if (fbUser) {
+        const stored = localStorage.getItem(USER_KEY);
+        if (!stored) {
+          const profile: UserProfile = {
+            uid: fbUser.uid,
+            name: fbUser.displayName || fbUser.email?.split('@')[0] || 'User',
+            phone: (fbUser as any).phoneNumber || '',
+            email: fbUser.email || '',
+            loggedInAt: new Date().toISOString(),
+          };
+          setUser(profile);
+          localStorage.setItem(USER_KEY, JSON.stringify(profile));
+        }
+      } else {
+        const stored = localStorage.getItem(USER_KEY);
+        if (stored) {
+          // Only clear if there's no Firebase session but we had one
+          // Keep local user for non-Firebase logins
+        }
+      }
+    });
+    return () => unsub();
+  }, []);
+
+  // Persist cart
+  useEffect(() => {
+    localStorage.setItem(CART_KEY, JSON.stringify(cartItems));
   }, [cartItems]);
 
-  // Live Toast for Admin and Store feedback
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-  const triggerToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
-  };
-
-  // Centralized Global Catalog Sync & Real-time SSE Connection
+  // Persist user
   useEffect(() => {
-    // 1. Initial cached products
-    const initialProds = productService.getCachedProducts();
-    setProducts(initialProds);
-    const loadedOrds = loadOrders();
-    setOrders(loadedOrds);
+    if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+    else localStorage.removeItem(USER_KEY);
+  }, [user]);
 
-    // 2. Subscribe to real-time updates (cross-device SSE + cross-tab BroadcastChannel)
-    const unsubscribe = productService.subscribe((liveProducts) => {
-      setProducts(liveProducts);
-    });
-
-    // 3. Fetch latest from server
-    productService.fetchGlobalProducts().then((latest) => {
-      setProducts(latest);
-    }).catch(() => {});
-
-    // 4. Fetch latest orders from server
-    fetch('/api/orders')
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success && Array.isArray(data.orders)) {
-          setOrders(data.orders);
-        }
-      })
-      .catch(() => {});
-
-    return () => {
-      unsubscribe();
-    };
-  }, []);
-
-  // Keyboard shortcut (Ctrl+Shift+A or Ctrl+Shift+S) to quickly open secret Seller Hub
+  // Persist addresses
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key.toLowerCase() === 'a' || e.key.toLowerCase() === 's')) {
-        e.preventDefault();
-        openSellerPanel();
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+    localStorage.setItem(ADDR_KEY, JSON.stringify(addresses));
+  }, [addresses]);
 
-  // Admin / Seller Actions with Centralized Server Propagation
-  const handleAddProduct = async (newProduct: Product) => {
-    const updated = [newProduct, ...products.filter((p) => p.id !== newProduct.id)];
-    setProducts(updated);
-    triggerToast(t(language, 'productAddedSuccess'));
-
-    await productService.createProduct(newProduct);
-  };
-
-  const handleUpdateProduct = async (updatedProduct: Product) => {
-    const updated = products.map((p) => (p.id === updatedProduct.id ? updatedProduct : p));
-    setProducts(updated);
-    if (selectedProductForDetails?.id === updatedProduct.id) {
-      setSelectedProductForDetails(updatedProduct);
+  // Toast auto-dismiss
+  useEffect(() => {
+    if (toast) {
+      const t = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(t);
     }
-    triggerToast(t(language, 'productUpdatedSuccess'));
+  }, [toast]);
 
-    await productService.updateProduct(updatedProduct);
-  };
+  const cartCount = cartItems.reduce((sum, item) => sum + item.quantity, 0);
 
-  const handleDeleteProduct = async (productId: string) => {
-    const updated = products.filter((p) => p.id !== productId);
-    setProducts(updated);
-    if (selectedProductForDetails?.id === productId) {
-      setSelectedProductForDetails(null);
+  const filteredProducts = useMemo(() => {
+    let list = [...products];
+    if (activeCategory !== 'all') {
+      list = list.filter((p) => p.category === activeCategory);
     }
-    triggerToast(t(language, 'productDeletedSuccess'));
-
-    await productService.deleteProduct(productId);
-  };
-
-  const handleToggleStatus = async (productId: string) => {
-    const updated = products.map((p) => {
-      if (p.id === productId) {
-        return { ...p, status: (p.status === 'draft' ? 'live' : 'draft') as any };
-      }
-      return p;
-    });
-    setProducts(updated);
-    triggerToast('Product catalog status updated.');
-
-    await productService.toggleProductStatus(productId);
-  };
-
-  const handleUpdateOrderShipping = (orderId: string, updates: Partial<Order>) => {
-    const updated = updateOrder(orderId, updates);
-    setOrders(updated);
-    triggerToast('Order fulfillment status updated.');
-  };
-
-  const handleResetCatalog = async () => {
-    triggerToast('Resetting catalog to default...');
-    const res = await productService.resetCatalog();
-    setProducts(res.products);
-    triggerToast(t(language, 'catalogResetSuccess'));
-  };
-
-  // Payment Success Handler with Instant Telegram Alert
-  const handlePaymentSuccess = (order: Order) => {
-    // Save order
-    saveOrder(order);
-    setOrders((prev) => [order, ...prev]);
-
-    // Fire Instant Telegram Order Alert to Seller
-    sendTelegramOrderAlert(order).catch((err) => {
-      console.warn('Telegram notification failed:', err);
-    });
-
-    // Close checkout modals and open Order Confirmation
-    setSelectedProductForCheckout(null);
-    setSelectedProductForPhysicalCheckout(null);
-    setSelectedProductForDetails(null);
-    setLatestOrder(order);
-  };
-
-  // Buy Now Handler: Dispatches physical checkout modal or 3-in-1 universal checkout modal
-  const handleBuyProduct = (product: Product) => {
-    // Check if it's a physical product: zero-loss advance checkout flow
-    if (product.productType === 'physical') {
-      setSelectedProductForPhysicalCheckout(product);
-      return;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      list = list.filter(
+        (p) =>
+          p.title.toLowerCase().includes(q) ||
+          p.description.toLowerCase().includes(q)
+      );
     }
+    return list;
+  }, [products, activeCategory, searchQuery]);
 
-    // 3-in-1 Universal Checkout Modal (Razorpay / Paytm / Direct UPI)
-    setSelectedProductForCheckout(product);
-  };
-
-  // Cart Operations
   const handleAddToCart = (product: Product, quantity = 1) => {
     setCartItems((prev) => {
-      const existingIndex = prev.findIndex((item) => item.product.id === product.id);
-      if (existingIndex > -1) {
+      const existing = prev.findIndex((item) => item.product.id === product.id);
+      if (existing > -1) {
         const next = [...prev];
-        next[existingIndex] = {
-          ...next[existingIndex],
-          quantity: next[existingIndex].quantity + quantity
-        };
+        next[existing] = { ...next[existing], quantity: next[existing].quantity + quantity };
         return next;
       }
-      return [...prev, { product, quantity, addedAt: new Date().toISOString() }];
+      return [...prev, { product, quantity }];
     });
-    triggerToast(
-      language === 'hi'
-        ? `"${product.titleHi || product.title}" �"ार्�x म�!� �S�9ड़ा �या!`
-        : `"${product.title}" added to cart!`
-    );
+    setToast(`"${product.title}" added to cart!`);
   };
 
-  const handleUpdateCartQuantity = (productId: string, quantity: number) => {
-    if (quantity <= 0) {
-      handleRemoveCartItem(productId);
+  const handleUpdateQty = (productId: string, qty: number) => {
+    if (qty <= 0) {
+      handleRemoveItem(productId);
       return;
     }
     setCartItems((prev) =>
-      prev.map((item) =>
-        item.product.id === productId ? { ...item, quantity } : item
-      )
+      prev.map((item) => (item.product.id === productId ? { ...item, quantity: qty } : item))
     );
   };
 
-  const handleRemoveCartItem = (productId: string) => {
+  const handleRemoveItem = (productId: string) => {
     setCartItems((prev) => prev.filter((item) => item.product.id !== productId));
-    triggerToast('Item removed from cart');
+    setToast('Item removed from cart');
   };
 
-  const handleClearCart = () => {
+  const handleBuyNow = (product: Product) => {
+    if (product.stock === 0) return;
+    handleAddToCart(product);
+    setSelectedProduct(null);
+    setIsCartOpen(false);
+    setIsCheckoutOpen(true);
+  };
+
+  const handleCheckoutSuccess = (order: Order) => {
+    setConfirmedOrder(order);
     setCartItems([]);
-    clearCartStorage();
+    setIsCheckoutOpen(false);
+    setIsCartOpen(false);
+    localStorage.removeItem(CART_KEY);
   };
 
-  const handleCartPaymentSuccess = (newOrders: Order[]) => {
-    // Save all new generated orders
-    for (const ord of newOrders) {
-      saveOrder(ord);
-    }
-    setOrders((prev) => [...newOrders, ...prev]);
-
-    // Clear cart and close checkout modal
-    handleClearCart();
-    setIsCartCheckoutOpen(false);
-
-    // Show order confirmation for the first order
-    if (newOrders.length > 0) {
-      setLatestOrder(newOrders[0]);
-    }
-    triggerToast(
-      language === 'hi'
-        ? '�x}0 �a�!�"� �0�x एव� �र्डर सफल!'
-        : '�x}0 Order confirmed & payment submitted!'
-    );
+  const handleLogin = (profile: UserProfile) => {
+    setUser(profile);
+    setToast(`Welcome, ${profile.name}!`);
   };
 
-  // Live products for customer storefront (Draft items hidden from public)
-  const liveProducts = useMemo(() => products.filter((p) => p.status !== 'draft'), [products]);
-
-  // Counts for filters based on live products
-  const digitalCount = useMemo(() => liveProducts.filter((p) => p.productType !== 'physical').length, [liveProducts]);
-  const physicalCount = useMemo(() => liveProducts.filter((p) => p.productType === 'physical').length, [liveProducts]);
-  const ebookCount = useMemo(() => liveProducts.filter((p) => p.category === 'ebook').length, [liveProducts]);
-  const plannerCount = useMemo(() => liveProducts.filter((p) => p.category === 'planner').length, [liveProducts]);
-
-  // Filter & Sort computation for Customer Storefront
-  const filteredProducts = useMemo(() => {
-    // Exclusively show products with status Live on customer storefront
-    let list = products.filter((p) => p.status !== 'draft');
-
-    // 1. Top-Level Product Type Filter [All | Digital | Physical]
-    if (selectedType === 'digital') {
-      list = list.filter((p) => p.productType !== 'physical');
-    } else if (selectedType === 'physical') {
-      list = list.filter((p) => p.productType === 'physical');
+  const handleLogout = async () => {
+    try {
+      await fbSignOut(auth);
+    } catch {
+      // ignore if not signed in via Firebase
     }
+    setUser(null);
+    setIsAccountOpen(false);
+    setToast('Logged out successfully');
+  };
 
-    // 2. Category sub-filter (eBooks vs Planners)
-    if (selectedCategory !== 'all') {
-      list = list.filter((p) => p.category === selectedCategory);
-    }
+  const handleOpenAccount = () => {
+    setIsAccountOpen(true);
+  };
 
-    // 3. Search query
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().trim();
-      list = list.filter((p) => {
-        const titleMatch = p.title.toLowerCase().includes(q) || (p.titleHi && p.titleHi.toLowerCase().includes(q));
-        const descMatch = p.description.toLowerCase().includes(q) || (p.descriptionHi && p.descriptionHi.toLowerCase().includes(q));
-        const badgeMatch = p.badge && p.badge.toLowerCase().includes(q);
-        return titleMatch || descMatch || badgeMatch;
-      });
-    }
-
-    // 4. Sorting
-    switch (sortBy) {
-      case 'price_low':
-        list.sort((a, b) => a.price - b.price);
-        break;
-      case 'price_high':
-        list.sort((a, b) => b.price - a.price);
-        break;
-      case 'rating':
-        list.sort((a, b) => b.rating - a.rating);
-        break;
-      case 'featured':
-      default:
-        // Keep order or prioritize Bestseller
-        list.sort((a, b) => (b.badge ? 1 : 0) - (a.badge ? 1 : 0));
-        break;
-    }
-
-    return list;
-  }, [products, selectedType, selectedCategory, searchQuery, sortBy]);
-
-  // If on dedicated Seller / Admin view route, render Meesho-Style Supplier Panel
-  if (isSellerView) {
-    return (
-      <SupplierPanel
-        products={products}
-        orders={orders}
-        onAddProduct={handleAddProduct}
-        onUpdateProduct={handleUpdateProduct}
-        onDeleteProduct={handleDeleteProduct}
-        onToggleStatus={handleToggleStatus}
-        onResetCatalog={handleResetCatalog}
-        onUpdateOrderShipping={handleUpdateOrderShipping}
-        onBackToStorefront={closeSellerPanel}
-        language={language}
-      />
-    );
-  }
+  const handleTrackOrder = (order: Order) => {
+    setTrackingOrder(order);
+    setIsAccountOpen(false);
+    setIsTrackingOpen(true);
+  };
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 font-sans text-slate-900">
-      {/* 1. Urgency Countdown Timer Top Banner */}
-      <CountdownBanner
-        language={language}
-        onShopNow={() => {
-          document.getElementById('product-catalog-section')?.scrollIntoView({ behavior: 'smooth' });
-        }}
-      />
-
-      {/* Toast Notification */}
-      {toastMessage && (
-        <div className="fixed bottom-5 right-5 z-50 bg-slate-900 text-white text-xs font-semibold px-4 py-3 rounded-2xl shadow-xl flex items-center gap-2 border border-slate-700 animate-fadeIn">
-          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{toastMessage}</span>
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-20 md:bottom-5 right-5 z-[60] bg-slate-900 text-white text-sm font-medium px-4 py-3 rounded-xl shadow-xl flex items-center gap-2 animate-fadeIn">
+          <span>{toast}</span>
         </div>
       )}
 
-      {/* Main Header */}
       <Header
-        language={language}
-        onLanguageChange={setLanguage}
+        cartCount={cartCount}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        purchasesCount={orders.length}
-        cartCount={cartItems.reduce((sum, item) => sum + item.quantity, 0)}
-        onOpenCart={() => setIsCartDrawerOpen(true)}
-        onOpenDownloads={() => setIsDownloadsOpen(true)}
-        onOpenAdmin={openSellerPanel}
-        onOpenSeller={openSellerPanel}
-        onOpenSupport={() => setIsSupportOpen(true)}
-        onOpenTracking={() => handleOpenTracking()}
-      />
-
-      {/* Hero section removed for Meesho style layout */}
-
-      {/* Main Content Area */}
-      <main id="product-catalog-section" className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-8">
-      {/* Product Catalog Grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-        {filteredProducts && filteredProducts.map((product) => (
-          <ProductCard
-            key={product.id}
-            product={product}
-            language={language}
-            onSelectProduct={(p) => setSelectedProduct(p)}
-            onAddToCart={(p) => handleAddToCart(p)}
-          />
-        ))}
-      </div>
-    </main>
-
-    {/* Store Footer */}
-      <Footer
-        language={language}
-        onOpenAdmin={openSellerPanel}
-        onOpenSeller={openSellerPanel}
-        onOpenSupport={() => setIsSupportOpen(true)}
-        onOpenTracking={() => handleOpenTracking()}
-      />
-
-      {/* Floating Dynamic Social Proof Notification */}
-      <SocialProofToast language={language} />
-
-      {/* Floating Customer Support Button */}
-      <FloatingSupportButton
-        onClick={() => setIsSupportOpen(true)}
-        language={language}
-      />
-
-      {/* MODALS */}
-
-      {/* 1. Product Details Modal */}
-      {selectedProductForDetails && (
-        <ProductDetailsModal
-          product={selectedProductForDetails}
-          language={language}
-          onClose={() => setSelectedProductForDetails(null)}
-          onProceedToCheckout={(prod) => {
-            setSelectedProductForDetails(null);
-            handleBuyProduct(prod);
-          }}
-          onAddToCart={(prod) => handleAddToCart(prod)}
-          onOpenPreview={(prod) => setPreviewProduct(prod)}
-        />
-      )}
-
-      {/* 2. Digital Instant UPI Checkout Modal */}
-      {selectedProductForCheckout && (
-        <UpiCheckoutModal
-          product={selectedProductForCheckout}
-          language={language}
-          onClose={() => setSelectedProductForCheckout(null)}
-          onPaymentSuccess={handlePaymentSuccess}
-        />
-      )}
-
-      {/* 2b. Zero-Loss Physical Parcel Checkout Modal (Advance Delivery Fee + Address) */}
-      {selectedProductForPhysicalCheckout && (
-        <PhysicalCheckoutModal
-          product={selectedProductForPhysicalCheckout}
-          language={language}
-          onClose={() => setSelectedProductForPhysicalCheckout(null)}
-          onPaymentSuccess={handlePaymentSuccess}
-        />
-      )}
-
-      {/* 3. Post-Purchase Order Confirmation Modal with Instant Delivery */}
-      {latestOrder && (
-        <OrderConfirmationModal
-          order={latestOrder}
-          product={
-            products.find((p) => p.id === latestOrder.productId) || {
-              id: latestOrder.productId,
-              title: latestOrder.productTitle,
-              category: latestOrder.category,
-              price: latestOrder.price,
-              originalPrice: latestOrder.price,
-              coverImage: '',
-              description: '',
-              highlights: [],
-              pdfUrl: latestOrder.pdfUrl,
-              rating: 5,
-              reviewsCount: 1,
-              createdAt: ''
-            }
-          }
-          language={language}
-          onClose={() => setLatestOrder(null)}
-          onOpenDownloads={() => {
-            setLatestOrder(null);
-            setIsDownloadsOpen(true);
-          }}
-          onOpenTracking={(ord) => handleOpenTracking(ord)}
-        />
-      )}
-
-      {/* 4. Customer Downloads Modal */}
-      <MyDownloadsModal
-        isOpen={isDownloadsOpen}
-        orders={orders}
-        products={products}
-        language={language}
-        onClose={() => setIsDownloadsOpen(false)}
-        onExploreProducts={() => setIsDownloadsOpen(false)}
-        onOpenTracking={(ord) => handleOpenTracking(ord)}
-      />
-
-      {/* 5. Secret Admin Dashboard */}
-      <AdminModal
-        isOpen={isAdminOpen}
-        language={language}
-        products={products}
-        orders={orders}
-        onClose={() => setIsAdminOpen(false)}
-        onAddProduct={handleAddProduct}
-        onUpdateProduct={handleUpdateProduct}
-        onDeleteProduct={handleDeleteProduct}
-        onResetCatalog={handleResetCatalog}
-      />
-
-      {/* 6. Customer Support Modal (Telegram & FAQ & Ticket) */}
-      <CustomerSupportModal
-        isOpen={isSupportOpen}
-        onClose={() => setIsSupportOpen(false)}
-        language={language}
-      />
-
-      {/* 7. Product Sample Preview "Look Inside" Modal */}
-      <SamplePreviewModal
-        product={previewProduct}
-        isOpen={!!previewProduct}
-        onClose={() => setPreviewProduct(null)}
-        language={language}
-        onBuyNow={(prod) => handleBuyProduct(prod)}
-      />
-
-      {/* 8. Slide-out Cart Drawer with Item List & Subtotal */}
-      <CartDrawer
-        isOpen={isCartDrawerOpen}
-        onClose={() => setIsCartDrawerOpen(false)}
-        cartItems={cartItems}
-        language={language}
-        onUpdateQuantity={handleUpdateCartQuantity}
-        onRemoveItem={handleRemoveCartItem}
-        onClearCart={handleClearCart}
-        onProceedToCheckout={() => {
-          setIsCartDrawerOpen(false);
-          setIsCartCheckoutOpen(true);
+        onOpenCart={() => setIsCartOpen(true)}
+        onOpenAccount={handleOpenAccount}
+        onOpenTracking={() => setIsTrackingOpen(true)}
+        onCategoryClick={(cat) => {
+          setActiveCategory(cat);
+          setActiveNav('home');
         }}
-        onSelectProduct={(prod) => setSelectedProductForDetails(prod)}
+        activeCategory={activeCategory}
       />
 
-      {/* 9. Unified Multi-Item Cart Checkout Modal */}
-      {isCartCheckoutOpen && (
-        <CartCheckoutModal
-          isOpen={isCartCheckoutOpen}
-          onClose={() => setIsCartCheckoutOpen(false)}
-          cartItems={cartItems}
-          language={language}
-          onPaymentSuccess={handleCartPaymentSuccess}
+      {/* Hero banner */}
+      <div className="bg-gradient-to-r from-[#f43397] to-[#d62a87] text-white">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div>
+              <h2 className="text-2xl sm:text-3xl font-bold">Mega Sale Live!</h2>
+              <p className="text-sm sm:text-base text-pink-100 mt-1">Up to 60% off on packaging, stationery & more</p>
+            </div>
+            <div className="flex gap-3">
+              <div className="bg-white/20 backdrop-blur rounded-xl px-4 py-2 text-center">
+                <p className="text-2xl font-bold">{products.length}</p>
+                <p className="text-xs text-pink-100">Products</p>
+              </div>
+              <div className="bg-white/20 backdrop-blur rounded-xl px-4 py-2 text-center">
+                <p className="text-2xl font-bold">60%</p>
+                <p className="text-xs text-pink-100">Max Off</p>
+              </div>
+              <div className="bg-white/20 backdrop-blur rounded-xl px-4 py-2 text-center">
+                <p className="text-2xl font-bold">FREE</p>
+                <p className="text-xs text-pink-100">Delivery ₹499+</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile category pills */}
+      <div className="md:hidden bg-white border-b border-slate-100 sticky top-[105px] z-30">
+        <div className="flex gap-1.5 overflow-x-auto px-4 py-2 scrollbar-hide">
+          {[
+            { id: 'all', label: 'All' },
+            { id: 'packaging', label: '📦 Packaging' },
+            { id: 'stationery', label: '✏️ Stationery' },
+            { id: 'mobile_accessories', label: '📱 Mobile' },
+            { id: 'books', label: '📚 Books' },
+            { id: 'pdf_guides', label: '📄 PDF' },
+            { id: 'templates', label: '📋 Templates' },
+            { id: 'software', label: '💻 Software' },
+          ].map((cat) => (
+            <button
+              key={cat.id}
+              onClick={() => setActiveCategory(cat.id)}
+              className={`px-3 py-1.5 text-xs font-medium rounded-full whitespace-nowrap transition-all ${
+                activeCategory === cat.id
+                  ? 'bg-[#f43397] text-white'
+                  : 'bg-slate-100 text-slate-600'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Product grid */}
+      <main id="product-catalog-section" className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-bold text-slate-800">
+            {activeCategory === 'all' ? 'All Products' : activeCategory.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}
+          </h2>
+          <span className="text-sm text-slate-400">
+            {loadingProducts ? 'Loading...' : `${filteredProducts.length} products`}
+          </span>
+        </div>
+
+        {loadingProducts ? (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="bg-white rounded-xl border border-slate-200 overflow-hidden animate-pulse">
+                <div className="aspect-square bg-slate-200" />
+                <div className="p-3 space-y-2">
+                  <div className="h-3 bg-slate-200 rounded w-3/4" />
+                  <div className="h-3 bg-slate-200 rounded w-1/2" />
+                  <div className="h-8 bg-slate-200 rounded" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : filteredProducts.length === 0 ? (
+          <div className="text-center py-16">
+            <p className="text-slate-400 text-lg">No products found</p>
+            <p className="text-sm text-slate-400 mt-1">Try a different search or category</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4">
+            {filteredProducts.map((product) => (
+              <ProductCard
+                key={product.id}
+                product={product}
+                onSelect={setSelectedProduct}
+                onAddToCart={handleAddToCart}
+              />
+            ))}
+          </div>
+        )}
+      </main>
+
+      <Footer onOpenTracking={() => setIsTrackingOpen(true)} />
+
+      {/* Mobile bottom nav */}
+      <BottomNav
+        cartCount={cartCount}
+        active={activeNav}
+        onOpenHome={() => {
+          setActiveNav('home');
+          setActiveCategory('all');
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
+        onOpenCategories={() => {
+          setActiveNav('categories');
+          document.getElementById('product-catalog-section')?.scrollIntoView({ behavior: 'smooth' });
+        }}
+        onOpenOrders={() => {
+          setActiveNav('orders');
+          if (user) {
+            handleOpenAccount();
+          } else {
+            setIsTrackingOpen(true);
+          }
+        }}
+        onOpenCart={() => {
+          setActiveNav('cart');
+          setIsCartOpen(true);
+        }}
+        onOpenAccount={() => {
+          setActiveNav('account');
+          handleOpenAccount();
+        }}
+      />
+
+      {/* Modals */}
+      {selectedProduct && (
+        <ProductModal
+          product={selectedProduct}
+          onClose={() => setSelectedProduct(null)}
+          onAddToCart={handleAddToCart}
+          onBuyNow={handleBuyNow}
         />
       )}
 
-      {/* 10. Meesho-Themed Order Tracking Modal */}
+      <CartDrawer
+        isOpen={isCartOpen}
+        onClose={() => setIsCartOpen(false)}
+        cartItems={cartItems}
+        onUpdateQuantity={handleUpdateQty}
+        onRemoveItem={handleRemoveItem}
+        onCheckout={() => {
+          setIsCartOpen(false);
+          setIsCheckoutOpen(true);
+        }}
+        onSelectProduct={() => {}}
+      />
+
+      {isCheckoutOpen && cartItems.length > 0 && (
+        <CheckoutModal
+          cartItems={cartItems}
+          onClose={() => setIsCheckoutOpen(false)}
+          onSuccess={handleCheckoutSuccess}
+        />
+      )}
+
+      {confirmedOrder && (
+        <OrderConfirmationModal
+          order={confirmedOrder}
+          onClose={() => setConfirmedOrder(null)}
+          onTrackOrder={() => {
+            setConfirmedOrder(null);
+            setTrackingOrder(confirmedOrder);
+            setIsTrackingOpen(true);
+          }}
+        />
+      )}
+
       <OrderTrackingModal
         isOpen={isTrackingOpen}
         onClose={() => setIsTrackingOpen(false)}
-        orders={orders}
-        initialOrder={selectedTrackingOrder || latestOrder}
-        searchPhone={searchPhone}
-        onSearchPhoneChange={setSearchPhone}
-        language={language}
+        initialOrder={trackingOrder}
+        searchPhone={user?.phone || ''}
+      />
+
+      <AccountModal
+        isOpen={isAccountOpen}
+        onClose={() => setIsAccountOpen(false)}
+        user={user}
+        onLogin={handleLogin}
+        onLogout={handleLogout}
+        addresses={addresses}
+        onAddressesChange={setAddresses}
+        onTrackOrder={handleTrackOrder}
       />
     </div>
   );
